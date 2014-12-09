@@ -3,7 +3,8 @@ invertStrongLens
 
 MCMC method to invert strong gravitational lenses
 
-REQUIREMENTS
+REQUIREMENTS 
+
 python 3 + numpy + scipy
 
 
