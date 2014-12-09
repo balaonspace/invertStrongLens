@@ -3,6 +3,9 @@ invertStrongLens
 
 MCMC method to invert strong gravitational lenses
 
+REQUIREMENTS
+python 3 + numpy + scipy
+
 
 To simulate gravitationally lensed images for given lens and source parameters
 
