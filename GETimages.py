@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 #### To obtain the images for a given set of lens parameters and source parameters
-#### The lens is a non singular isothermal ellipsoid
-#### The source has a sersic light profile
+#### The lens is a non singular isothermal ellipsoid with external shear
+#### The source has a sersic profile
 
 import sys
 import csv
@@ -10,6 +10,7 @@ import numpy as np
 import scipy as sp
 from scipy import optimize
 from scipy import ndimage
+from scipy import signal
 import time
 #### import pyfits
 #### import matplotlib.pyplot as plt
@@ -21,8 +22,9 @@ pi = np.pi
 #### To convert the given csv files to a numpy array or matrix
 def csv2array(givenImage):
 	arrayImage = []
-	givenCSV = csv.reader(open(givenImage,"rb"),delimiter=',')
-
+	#givenCSV = csv.reader(open(givenImage,"rb"),delimiter=',')
+	givenCSV = csv.reader(open(givenImage,"rt",encoding="utf8"),delimiter=',')
+	
 	for row in givenCSV:
 		givenRow = []
 		for item in row:
@@ -82,112 +84,36 @@ def getAlphaNIEXS(lensParam,X):
 	return Xr, alpha
 
 
-
-#### To calculate the magnification
-def getMagnification(Y,pixsz):
-	#### the size of the image
-	n = Y.shape[0]-1
-	
-	area = pixsz*pixsz*np.ones((n,n))
-	areaQ = np.ones((n,n))
-	
-	#### The real and imaginary part of Y in the source plane
-	Yreal = Y.real
-	Yimag = Y.imag
-
-	#### The square pixels on the lens plane are mapped to quadrilateral pixels in the source plane
-	#### The area enclosed by a quadrilateral can be written as the sum of two triangles
-	for ii in range(n):
-		for jj in range(n):
-			#### Area of first triangle
-			T1 = [ [1.0,1.0,1.0], [Yreal[ii,jj],Yreal[ii,jj+1],Yreal[ii+1,jj]], [Yimag[ii,jj],Yimag[ii,jj+1],Yimag[ii+1,jj]] ]
-			areaT1 = np.abs(np.linalg.det(T1))
-
-			#### Area of second triangle
-			T2 = [ [1.0,1.0,1.0], [Yreal[ii+1,jj+1],Yreal[ii,jj+1],Yreal[ii+1,jj]], [Yimag[ii+1,jj+1],Yimag[ii,jj+1],Yimag[ii+1,jj]] ]
-			areaT2 = np.abs(np.linalg.det(T2))
-			
-			#### Area of the quadrilateral
-			areaQ[ii,jj] = areaT1+areaT2
-	
-	#### magnification map - mu
-	mu = area/areaQ
-	#### Setting an upper threshold on the magnification
-	mu[mu>100.0] = 100.0
-	#### Above command might return message
-	#### "invalid value encountered in greater"
-
-	#### Return the magnification
-	return mu
-
-
-
-#### To invert the given arc and find the source flux, magnification
-def getSourcePlane(lensParam,kparam,X,Xm):
-	
-	pixsz = kparam[0]
-	
-	#### The threshold for my above which you need to resample the grid
-	thresh = 30.0
-	
-	#### To find the magnification map for the given lens parameters
-
-	#### First calculate the deflection angle and the rotated lens plane grid	
-	Xr, alpha = getAlphaNIEXS(lensParam,Xm)
-	#### Then calculate the Source plane grid
-	Y = Xm - alpha
-	#### The magnification map - mu
-	mu = getMagnification(Y,pixsz)
-
-	#### In the above magnification map the points near the critical curve are re-sampled and re-calculated
-	m = mu
-	x1 = X.real
-	x2 = X.imag
-	
-	x1 = x1[m > thresh]
-	x2 = x2[m > thresh]
-	m = m[m > thresh]
-	muIndex = np.array(np.nonzero(mu > thresh))
-
-	hpixsz = pixsz/2 	#### half pixel size
-	
-
-	for ii in range(m.shape[0]):
-		kkparam = [hpixsz,3,x1[ii],x2[ii]]
-		
-		XX1,XX2 = getLensGrid(kkparam)
-		XX = XX1 + 1j*XX2
-		
-		XXr, alphaCrit = getAlphaNIEXS(lensParam,XX)
-		YY = XX - alphaCrit
-		
-		muCrit = np.sum(getMagnification(YY,hpixsz))/4.0
-		mu[muIndex[0,ii],muIndex[1,ii]] = muCrit	
-
-	magnification = mu
-
-	#### Compute the deflection angle for grid points in the lens plane
-
-	Xr, alpha = getAlphaNIEXS(lensParam,X)
-
-	#### Source plane grid
-	Y = X - alpha
-	
-	return magnification, Y 
-
-
 #### The sersic function for the source parameters
 def sersicFunc(r,Reff,n):
 	return np.exp((-2.0*n+0.327)*(np.power(r/Reff,1/n)))
 
+##### chiSq, SSE, indexn, Reffn, centroid, sc = getChisqImage(lensParam, kparam, obsImage, maskImage, sourceData, sourceFlux, magnification, Y)
+
 
 #### To find the arc images for a given lens and source
-def getArcs(srcPos,Reff,Sc,sersicInd,kappaN,srcRad,srcPA,srcEllp,Y,magnification,lensPA):	
-
+def getArcs(sourceParam, Y):	
+	
+	Sc = sourceParam[0]
+	sersicInd = sourceParam[1]
+	kappaN = 2*sersicInd - 0.327
+	Reff = sourceParam[2]
+	srcRad = sourceParam[3]
+	srcPos = sourceParam[4] + 1j*sourceParam[5]
+	srcEllp = sourceParam[6]
+	srcPA = sourceParam[7]
+	
 	npix = Y.shape[0]
 	
-	#### The sourc plane is tranlated and rotated
-	Ytr = np.exp(-1j*srcPA)*(Y - srcPos)
+	#### The center is adjusted so that it is traced to the image plane
+	Yn = np.reshape(Y,(npix*npix,1))
+	Yn1 = np.abs(Yn-srcPos)
+	mi = np.where(Yn1-np.nanmin(Yn1) < 1e-6)
+	Yn2 = Yn[mi]
+	errc = Yn2 - srcPos
+
+	#### The source plane is translated and rotated
+	Ytr = np.exp(-1j*srcPA)*(Y - srcPos - errc)
 
 	#### Hit parameter to constraint the points on the lens plane that have orginated from the source
 	hit = (Ytr.real**2) + (Ytr.imag**2)/(1-srcEllp)**2
@@ -195,7 +121,7 @@ def getArcs(srcPos,Reff,Sc,sersicInd,kappaN,srcRad,srcPA,srcEllp,Y,magnification
 	hit[hit>srcRad**2] = 1e5
 
 	#### Eliminate the core image
-	hitCore = range(np.round(npix/2)-5,np.round(npix/2)+6)
+	hitCore = range(int(np.round(npix/2))-5,int(np.round(npix/2))+6)
 	for ii in range(11):
 		hit[hitCore[ii],hitCore] = 1e5
 	
@@ -203,20 +129,19 @@ def getArcs(srcPos,Reff,Sc,sersicInd,kappaN,srcRad,srcPA,srcEllp,Y,magnification
 
 	#### Flux in the source plane
 	fluxSrc = Sc*np.exp(-kappaN * (np.power(np.sqrt(hit)/Reff,1/sersicInd) - 1) )
-	#fluxSrc = (np.power(np.sqrt(hit)/Reff,1/sersicInd) )
-
-	#### np.savetxt("flux2.csv",fluxSrc,delimiter=",")
-	#### Observed image or arcs 
-	arcsObs = np.multiply(fluxSrc,magnification)
-	#arcsObs = fluxSrc*magnification
+	fluxSrc[fluxSrc<1e-3] = 0;
 	
-	return arcsObs
+	return fluxSrc
 
 
 
 
 ########################################################################################################################
 ##### THE ROUTINE STARTS HERE
+
+if len(sys.argv) != 2:
+	sys.exit('Provide a psf file in csv format.')
+psf = csv2array(sys.argv[1])
 
 #### The known information
 #### known parameters 
@@ -225,66 +150,38 @@ pixsz = 0.049
 npix = 151
 
 kparam = [pixsz, npix, 0, 0]
-#### print kparam
 
+#### LensParam = [einsteinRadius axisRatio coreRadius positionAngle xshear1 xshear2]
+#### external shear is xshear = xshear1 + 1j*xshear2
+#### short notation LensParam = [einRad f bc t xshear1 xshear2]
+#### sourceParam = [Intensity sersicIndex effectiveRad srcRad srcPos1 srcPos2 srcEllp srcPA]
+#### srcEllp = 0, circular source
+
+lensParam = [1.6, 0.8, 0.0, pi/4.5, 0.00, 0.00]
+sourceParam = [6, 4, 0.2, 0.4, -0.14, 0.14, 0.3, 0]
+
+#### Add noise to the arc image
+#### noise = np.random.normal(mean,standardDeviation,(xSize,ySize))
+noise = np.random.normal(0,8,(npix,npix))
 
 #### Obtain the grid on the lens plane - X
 x1, x2 = getLensGrid(kparam)
 X = x1 + 1j*x2
 
-#### Obtain the grid on the lens plane to compute magnification - Xm
-kkparam = [pixsz, npix+1, 0, 0]
-x1m, x2m = getLensGrid(kkparam)
-Xm = x1m + 1j*x2m
-
-
-#### LensParam = [einsteinRadius axisRatio coreRadius positionAngle xshear1 xshear2]
-#### external shear is xshear = xshear1 + 1j*xshear2
-#### short notation LensParam = [einRad f bc t xshear1 xshear2]
-#### sourceParam = [srcPos1 srcPos2 srcRad effectiveRad srcEllp srcPA]
-#### srcEllp = 0, circular source
-
-#### Invert the lens for the given set of lens parameters and source parameters
-
-#### lensParam = [1.5, 0.7, 0.3, pi/3, -0.03, 0.02]
-
-lensParam = [1.5, 0.8, 0.2, pi/3, 0.1, 0.00]
-srcParam = [0.0, 0.0, 0.4, 0.3, 0, 0]
-
-srcPos = srcParam[0]+1j*srcParam[1]
-srcRad = srcParam[2]
-Reff = srcParam[3]
-srcPA = srcParam[4]
-srcEllp = srcParam[5]
-sersicInd = 4.0
-Sc = 1.0
-kappaN = 2.0*sersicInd - 0.327
-
-lensPA = lensParam[3]
-
 #### Find the source image flux and magnification map
-magnification, Y = getSourcePlane(lensParam,kparam,X,Xm)
+Xr, alpha = getAlphaNIEXS(lensParam,X)
+Y = X - alpha
 
-arcImage = getArcs(srcPos,Reff,Sc,sersicInd,kappaN,srcRad,srcPA,srcEllp,Y,magnification,lensPA)
-### arcImage[arcImage<40] = 0.0
+arcImage = getArcs(sourceParam, Y)
+arcImage = sp.signal.convolve2d(arcImage,psf,mode='same')
 
-#### Add noise to the arc image
-#### sigma + np.random.randn(dimension1,dimension2) + mean
-
-#### noise = 8*np.random.randn(151,151)
-noise = np.random.normal(4,8,(151,151))
 obsImage = arcImage + noise 
 
-axisLim = npix*pixsz/2
-##im1 = plt.imshow(obsImage, interpolation='bilinear',origin='lower',extent=[-axisLim,axisLim,-axisLim,axisLim])
-#plt.show()
 
-
-arcImage[arcImage<40] = 0.0
+arc = arcImage + noise 
+arc[arcImage<16] = 0.0
 
 
 #### Save the necessary output
-#### The magnification map for the lens parameters
-np.savetxt("magnification.csv",magnification,delimiter=",")
-np.savetxt("arcImage.csv",arcImage,delimiter=",")
-np.savetxt("obsImage.csv",obsImage,delimiter=",")
+np.savetxt("arcImage1.csv",arc,delimiter=",")
+np.savetxt("obsImage1.csv",obsImage,delimiter=",")
